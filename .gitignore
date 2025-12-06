@@ -1,0 +1,18 @@
+# Environment variables
+.env
+.env.local
+
+# Node.js
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Logs
+logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
