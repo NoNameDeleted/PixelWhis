@@ -139,27 +139,45 @@ bot.command('game', async (ctx) => {
     // Сохраняем файлы для игры
     games.set(userId, { imageFiles, pending: 'rounds' });
 
-    // Отправляем приветственное сообщение с кнопкой
+    // Определяем количество каналов из captions.json
+    const totalChannels = Object.keys(captions).length;
+
+    // Варианты раундов
+    const roundOptions = [5, 20, 50, 100, 150, 200, 300];
+    const filteredOptions = roundOptions.filter(n => n <= totalChannels);
+    filteredOptions.push(totalChannels); // Добавляем "все"
+
+    // Генерируем кнопки (по 2 в строку)
+    const inlineKeyboard = [];
+    for (let i = 0; i < filteredOptions.length; i += 2) {
+      const row = [];
+      const first = filteredOptions[i];
+      const second = filteredOptions[i + 1];
+
+      row.push({
+        text: first === totalChannels ? `Все ${first}` : `${first} раундов`,
+        callback_data: `rounds_${first}`
+      });
+
+      if (second) {
+        row.push({
+          text: second === totalChannels ? `Все ${second}` : `${second} раундов`,
+          callback_data: `rounds_${second}`
+        });
+      } else {
+        row.push({ text: ' ', callback_data: 'noop' }); // пустая кнопка, если нечётное
+      }
+
+      inlineKeyboard.push(row);
+    }
+
     await ctx.reply(
       '🎮 Выбери, сколько раундов хочешь сыграть:',
       {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '5 раундов', callback_data: 'rounds_5' },
-              { text: '20 раундов', callback_data: 'rounds_20' }
-            ],
-            [
-              { text: '50 раундов', callback_data: 'rounds_50' },
-              { text: '100 раундов', callback_data: 'rounds_100' }
-            ],
-            [
-              { text: 'Все!', callback_data: `rounds_${imageFiles.length}` }
-            ]
-          ]
-        }
+        reply_markup: { inline_keyboard: inlineKeyboard }
       }
     );
+
 
   } catch (err) {
     console.error(err);
@@ -255,26 +273,45 @@ bot.action('start_game', async (ctx) => {
 
     games.set(userId, { imageFiles, pending: 'rounds' });
 
+    // Определяем количество каналов из captions.json
+    const totalChannels = Object.keys(captions).length;
+
+    // Варианты раундов
+    const roundOptions = [5, 20, 50, 100, 150, 200, 300];
+    const filteredOptions = roundOptions.filter(n => n <= totalChannels);
+    filteredOptions.push(totalChannels); // Добавляем "все"
+
+    // Генерируем кнопки (по 2 в строку)
+    const inlineKeyboard = [];
+    for (let i = 0; i < filteredOptions.length; i += 2) {
+      const row = [];
+      const first = filteredOptions[i];
+      const second = filteredOptions[i + 1];
+
+      row.push({
+        text: first === totalChannels ? `Все ${first}` : `${first} раундов`,
+        callback_data: `rounds_${first}`
+      });
+
+      if (second) {
+        row.push({
+          text: second === totalChannels ? `Все ${second}` : `${second} раундов`,
+          callback_data: `rounds_${second}`
+        });
+      } else {
+        row.push({ text: ' ', callback_data: 'noop' }); // пустая кнопка, если нечётное
+      }
+
+      inlineKeyboard.push(row);
+    }
+
     await ctx.reply(
       '🎮 Выбери, сколько раундов хочешь сыграть:',
       {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '5 раундов', callback_data: 'rounds_5' },
-              { text: '20 раундов', callback_data: 'rounds_20' }
-            ],
-            [
-              { text: '50 раундов', callback_data: 'rounds_50' },
-              { text: '100 раундов', callback_data: 'rounds_100' }
-            ],
-            [
-              { text: 'Все!', callback_data: `rounds_${imageFiles.length}` }
-            ]
-          ]
-        }
+        reply_markup: { inline_keyboard: inlineKeyboard }
       }
     );
+
 
   } catch (err) {
     console.error(err);
@@ -503,26 +540,45 @@ bot.action('play_again', async (ctx) => {
 
     games.set(userId, { imageFiles, pending: 'rounds' });
 
+    // Определяем количество каналов из captions.json
+    const totalChannels = Object.keys(captions).length;
+
+    // Варианты раундов
+    const roundOptions = [5, 20, 50, 100, 150, 200, 300];
+    const filteredOptions = roundOptions.filter(n => n <= totalChannels);
+    filteredOptions.push(totalChannels);
+
+    // Генерируем кнопки (по 2 в строку)
+    const inlineKeyboard = [];
+    for (let i = 0; i < filteredOptions.length; i += 2) {
+      const row = [];
+      const first = filteredOptions[i];
+      const second = filteredOptions[i + 1];
+
+      row.push({
+        text: first === totalChannels ? `Все ${first}` : `${first} раундов`,
+        callback_data: `rounds_${first}`
+      });
+
+      if (second) {
+        row.push({
+          text: second === totalChannels ? `Все ${second}` : `${second} раундов`,
+          callback_data: `rounds_${second}`
+        });
+      } else {
+        row.push({ text: ' ', callback_data: 'noop' });
+      }
+
+      inlineKeyboard.push(row);
+    }
+
     await ctx.reply(
       '🎮 Выбери, сколько раундов хочешь сыграть:',
       {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '5 раундов', callback_data: 'rounds_5' },
-              { text: '20 раундов', callback_data: 'rounds_20' }
-            ],
-            [
-              { text: '50 раундов', callback_data: 'rounds_50' },
-              { text: '100 раундов', callback_data: 'rounds_100' }
-            ],
-            [
-              { text: 'Все!', callback_data: `rounds_${imageFiles.length}` }
-            ]
-          ]
-        }
+        reply_markup: { inline_keyboard: inlineKeyboard }
       }
     );
+
 
   } catch (err) {
     console.error(err);
