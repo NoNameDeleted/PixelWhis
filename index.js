@@ -167,6 +167,72 @@ bot.command('game', async (ctx) => {
   }
 });
 
+bot.command('total', async (ctx) => {
+  try {
+    const { data, error } = await supabase
+      .from('stat')
+      .select('all');
+
+    if (error) {
+      console.error('Ошибка при получении статистики:', error);
+      return ctx.reply('❌ Не удалось получить данные.');
+    }
+
+    const totalRounds = data.reduce((sum, row) => sum + row.all, 0);
+
+    await ctx.reply(`Общее количество раундов: ${totalRounds}`);
+  } catch (err) {
+    console.error('Ошибка в /total:', err);
+    ctx.reply('❌ Произошла ошибка.');
+  }
+
+  updateBotDescription();
+});
+
+// Функция для обновления описания бота
+// Функция для обновления короткого описания бота
+async function updateBotDescription() {
+  try {
+    // 1. Получаем общее количество раундов
+    const { data: stats, error: statsError } = await supabase
+      .from('stat')
+      .select('all');
+
+    if (statsError) {
+      console.error('Ошибка при получении данных для описания:', statsError);
+      return;
+    }
+
+    const totalRounds = stats.reduce((sum, row) => sum + row.all, 0);
+
+    // 2. Загружаем количество каналов из captions.json
+    let channelCount = 0;
+    try {
+      const captionsRaw = fs.readFileSync(path.resolve(__dirname, 'captions.json'), 'utf8');
+      const captionsData = JSON.parse(captionsRaw);
+      channelCount = Object.keys(captionsData).length;
+    } catch (err) {
+      console.error('Ошибка при загрузке captions.json:', err);
+      return;
+    }
+
+    // 3. Вычисляем среднее
+    const avgRoundsPerChannel = channelCount > 0 ? (totalRounds / channelCount).toFixed(1) : '0.0';
+
+    // 4. Формируем описание
+    const description = `Общее количество раундов: ${totalRounds}
+Среднее на канал: ${avgRoundsPerChannel}`;
+
+    // 5. Обновляем короткое описание бота
+    await bot.telegram.setMyShortDescription(description);
+
+    console.log(`✅ Описание бота обновлено: "${description}"`);
+  } catch (err) {
+    console.error('Ошибка при обновлении описания бота:', err);
+  }
+}
+
+
 bot.action('start_game', async (ctx) => {
   await ctx.answerCbQuery(); // убираем "часики"
 
