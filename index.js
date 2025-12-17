@@ -27,6 +27,10 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
 }
 
 const pfpsDir = path.resolve(__dirname, 'pfps');
+const artsDir = path.resolve(__dirname, 'arts');
+
+// Регистрируем викторину по артам
+const registerQuiz = require('./quiz');
 let captions = {};
 
 // Загружаем подписи
@@ -40,16 +44,26 @@ try {
 
 bot.start((ctx) => {
   ctx.reply(
-    '🎮 Привет! Это игра «Угадай писелярщика по аватарке»!\n\nНажми кнопку ниже, чтобы начать:',
+    '🎮 Привет! Выбери игру «Угадай писелярщика по аватарке»! или «Угадай писелярщика по его артам"\nНажми одну из кнопок ниже, чтобы начать:',
     {
       reply_markup: {
         inline_keyboard: [
-          [{ text: '🎮 Играть', callback_data: 'start_game' }]
+          [
+            { text: 'Аватарки', callback_data: 'start_game' },
+            { text: 'Арты', callback_data: 'start_arts' }
+          ]
         ]
       }
     }
   );
 });
+
+// Инициализируем модуль викторины по артам
+try {
+  registerQuiz({ bot, supabase, captions, artsDir });
+} catch (err) {
+  console.error('Ошибка при регистрации модуля quiz:', err);
+}
 
 
 bot.help((ctx) => ctx.reply('Send me a sticker'));
@@ -491,14 +505,17 @@ bot.action(/^q_\d+_\d+$/, async (ctx) => {
     // Проверяем — если это последний раунд, отправляем результат СРАЗУ
     if (game.currentRound >= game.totalRounds) {
     await ctx.reply(
-        `🏁 Игра окончена! Твой результат: ${game.score} из ${game.totalRounds}`,
-        {
-        reply_markup: {
-            inline_keyboard: [
-            [{ text: '🔁 Играть снова', callback_data: 'play_again' }]
-            ]
-        }
-        }
+      `🏁 Игра окончена! Твой результат: ${game.score} из ${game.totalRounds}`,
+      {
+      reply_markup: {
+        inline_keyboard: [
+        [
+          { text: '🔁 Играть снова', callback_data: 'play_again' },
+          { text: 'Выбрать другую игру', callback_data: 'choose_game' }
+        ]
+        ]
+      }
+      }
     );
     games.delete(userId);
     return;
@@ -583,6 +600,28 @@ bot.action('play_again', async (ctx) => {
   } catch (err) {
     console.error(err);
     ctx.reply('❌ Ошибка при запуске игры.');
+  }
+});
+
+// Выбрать другую игру — возвращает стартовое меню с выбором 'Аватарки' / 'Арты'
+bot.action('choose_game', async (ctx) => {
+  await ctx.answerCbQuery();
+  try {
+    await ctx.reply(
+      '🎮 Привет! Выбери игру «Угадай писелярщика по аватарке»! или «Угадай писелярщика по его артам"\nНажми одну из кнопок ниже, чтобы начать:',
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: 'Аватарки', callback_data: 'start_game' },
+              { text: 'Арты', callback_data: 'start_arts' }
+            ]
+          ]
+        }
+      }
+    );
+  } catch (err) {
+    console.error('Ошибка в choose_game:', err);
   }
 });
 
