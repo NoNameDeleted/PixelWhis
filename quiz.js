@@ -40,7 +40,6 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
 
   async function updateQuizStatsInDb(authorUsername, authorChannelName, artIndex, isCorrect) {
     try {
-      console.log('updateQuizStatsInDb called:', { authorUsername, authorChannelName, artIndex, isCorrect });
       let { data, error } = await supabase
         .from('quiz')
         .select('*')
@@ -53,7 +52,6 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
           data = null;
           error = null;
         } else {
-          console.error('Ошибка при получении записи quiz:', error);
           return;
         }
       }
@@ -309,11 +307,10 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
       for (const v of videoFiles) {
         const filePath = path.join(artsDir, v.file);
         try {
-          const sent = await bot.telegram.sendVideo(game.chatId, { source: fs.createReadStream(filePath) });
-          if (sent && sent.message_id) game.mediaMessages.push({ message_id: sent.message_id, artIndex: v.index });
-        } catch (e) {
-          console.error('Ошибка при отправке видео:', e);
-        }
+            const sent = await bot.telegram.sendVideo(game.chatId, { source: fs.createReadStream(filePath) });
+            if (sent && sent.message_id) game.mediaMessages.push({ message_id: sent.message_id, artIndex: v.index });
+          } catch (e) {
+          }
       }
 
       // send photos as media group
@@ -326,13 +323,11 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
             game.mediaMessages.push({ message_id: m.message_id, artIndex: photoFiles[i].index });
           }
         } catch (err2) {
-          console.error('Ошибка при отправке медиагруппы фото (fallback):', err2);
           for (const p of photoFiles) {
             try {
               const sent = await ctx.replyWithPhoto({ source: fs.createReadStream(path.join(artsDir, p.file)) });
               if (sent && sent.message_id) game.mediaMessages.push({ message_id: sent.message_id, artIndex: p.index });
             } catch (e) {
-              console.error('fallback send photo:', e);
             }
           }
         }
@@ -352,7 +347,6 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
         game.primaryArtIndex = artIdx;
       }
     } catch (err) {
-      console.error('Ошибка при отправке сообщения с кнопками:', err);
     }
   }
 
@@ -372,7 +366,6 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
       try {
         await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
       } catch (e) {
-        // ignore
       }
 
       const correct = game.currentAuthor;
@@ -392,11 +385,9 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
           try {
             await bot.telegram.editMessageReplyMarkup(game.chatId, game.buttonsMessageId, null, { inline_keyboard: [] });
           } catch (e) {
-            // ignore edit errors
           }
         }
       } catch (e) {
-        // ignore
       }
 
       game.currentRound++;
@@ -429,7 +420,6 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
       // Небольшая пауза и следующий вопрос
       setTimeout(() => sendNextArtQuestion(ctx, userId), 900);
     } catch (err) {
-      console.error('Ошибка при выборе автора (arts):', err);
     }
   });
 
@@ -439,7 +429,6 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
         await ctx.answerCbQuery();
         await sendRoundsSelection(ctx);
       } catch (err) {
-        console.error('Ошибка arts_play_again:', err);
       }
     });
 };
