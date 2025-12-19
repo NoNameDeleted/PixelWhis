@@ -350,7 +350,16 @@ async function sendNextQuestion(ctx, userId) {
   // ✅ Сохраняем текущий файл в game
   game.currentFile = correctFile;
 
-  sendCollage(ctx, game, correctFile);
+  try {
+    await sendCollage(ctx, game, correctFile);
+  } catch (err) {
+    if (err.message === 'USER_BLOCKED') {
+      console.log(`Игрок ${userId} заблокировал бота. Игра удалена.`);
+      games.delete(userId);
+      return;
+    }
+    console.error('Ошибка отправки вопроса:', err);
+  }
 }
 
 async function sendCollage(ctx, game, correctFile) {
@@ -521,8 +530,6 @@ bot.action(/^q_\d+_\d+$/, async (ctx) => {
     return;
     }
 
-
-
     // Иначе — ждём и отправляем следующий вопрос
     setTimeout(async () => {
       const newCtx = ctx; // можно использовать, потому что мы в пределах одной сессии
@@ -624,7 +631,6 @@ bot.action('choose_game', async (ctx) => {
     console.error('Ошибка в choose_game:', err);
   }
 });
-
 
 // === 🚨 Общая ошибка API ===
 bot.catch((err) => {

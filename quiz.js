@@ -1,8 +1,40 @@
 const fs = require('fs');
 const path = require('path');
+const { TelegramError } = require('telegraf');
 
 module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
   const artGames = new Map();
+
+  // === Универсальная функция повтора с экспоненциальной задержкой ===
+  async function retryOnRateLimit(fn, retries = 5, { ignore403 = false } = {}) {
+    let lastError;
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (err instanceof TelegramError) {
+          // Ошибка 403 — пользователь заблокировал бота
+          if (err.code === 403) {
+            console.warn(`❌ Пользователь заблокировал бота. Невозможно отправить сообщение.`);
+            if (ignore403) {
+              throw new Error('USER_BLOCKED');
+            }
+            throw err;
+          }
+
+          // Ошибка 429 — Too Many Requests
+          if (err.code === 429) {
+            const retryAfter = err.parameters?.retry_after || 1;
+            console.warn(`⚠️ Too Many Requests. Ждём ${retryAfter} сек.`);
+            await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+            continue;
+          }
+        }
+        throw err; // все остальные ошибки пробрасываем
+      }
+    }
+    throw lastError;
+  }
 
   // Сбор авторов и их артов из папки arts
   function buildAuthorsMap() {
@@ -28,15 +60,29 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
     return Object.keys(captions).map(k => path.basename(k, path.extname(k)));
   }
 
-  function randomPick(arr, n) {
-    const copy = arr.slice();
-    const res = [];
-    while (res.length < n && copy.length > 0) {
-      const i = Math.floor(Math.random() * copy.length);
-      res.push(copy.splice(i, 1)[0]);
+  // Получаем статистику всех авторов из базы
+  async function getAuthorStatsFromDb() {
+    try {
+      const { data, error } = await supabase
+        .from('quiz')
+        .select('username, all');
+
+      if (error) {
+        console.error('Ошибка при получении статистики авторов:', error);
+        return new Map();
+      }
+
+      const stats = new Map();
+      data.forEach(row => {
+        stats.set(row.username, row.all || 0);
+      });
+      return stats;
+    } catch (err) {
+      console.error('Ошибка в getAuthorStatsFromDb:', err);
+      return new Map();
     }
-    return res;
   }
+
 
   async function updateQuizStatsInDb(authorUsername, authorChannelName, artIndex, isCorrect) {
     try {
@@ -46,20 +92,12 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
         .eq('username', authorUsername)
         .single();
 
-      if (error) {
-        // PostgREST returns 406 / PGRST116 when no rows found for .single()
-        if (error.code === 'PGRST116' || error.status === 406) {
-          data = null;
-          error = null;
-        } else {
-          return;
-        }
+      if (error && error.code !== 'PGRST116' && error.status !== 406) {
+        console.error('Ошибка при получении quiz:', error);
+        return;
       }
 
-        // Новая логика: считаем любое правильное угадывание как +1 в `correct`.
-        const correctInc = isCorrect ? 1 : 0;
-        // Больше никаких отдельных колонок для second/other — таблица содержит только
-        // `correct`, `incorrect`, `all`, `percent`, `username`, `channel_name`.
+      const correctInc = isCorrect ? 1 : 0;
       const incorrectInc = !isCorrect ? 1 : 0;
       const allInc = 1;
 
@@ -67,9 +105,9 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
         const newCorrect = (data.correct || 0) + correctInc;
         const newIncorrect = (data.incorrect || 0) + incorrectInc;
         const newAll = (data.all || 0) + allInc;
-          const newPercent = newAll > 0 ? Math.round((newCorrect / newAll) * 100) : 0;
+        const newPercent = newAll > 0 ? Math.round((newCorrect / newAll) * 100) : 0;
 
-        const { data: updData, error: updErr } = await supabase
+        const { error: updErr } = await supabase
           .from('quiz')
           .update({
             channel_name: authorChannelName,
@@ -79,33 +117,28 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
             percent: newPercent
           })
           .eq('username', authorUsername);
+
         if (updErr) {
           console.error('Ошибка при обновлении quiz:', updErr);
-        } else {
-          console.log('Quiz row updated for', authorUsername, updData);
         }
       } else {
-        const correctVal = correctInc;
-        const incorrectVal = incorrectInc;
-        const allVal = allInc;
-          const percentVal = allVal > 0 ? Math.round((correctVal / allVal) * 100) : 0;
+        const percentVal = allInc > 0 ? Math.round((correctInc / allInc) * 100) : 0;
 
-        const { data: insData, error: insErr } = await supabase
+        const { error: insErr } = await supabase
           .from('quiz')
           .insert([
             {
               username: authorUsername,
               channel_name: authorChannelName,
-              correct: correctVal,
-              incorrect: incorrectVal,
-              all: allVal,
+              correct: correctInc,
+              incorrect: incorrectInc,
+              all: allInc,
               percent: percentVal
             }
           ]);
+
         if (insErr) {
           console.error('Ошибка при вставке quiz:', insErr);
-        } else {
-          console.log('Inserted new quiz row for', authorUsername, insData);
         }
       }
     } catch (err) {
@@ -122,10 +155,23 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
     for (const opt of options) {
       keyboard.push([{ text: `${opt}`, callback_data: `arts_rounds_${opt}` }]);
     }
-    // Добавляем "Все"
     keyboard.push([{ text: `Все ${totalAuthors}`, callback_data: `arts_rounds_${totalAuthors}` }]);
 
-    await ctx.reply('🎮 Выберите количество раундов:', { reply_markup: { inline_keyboard: keyboard } });
+    try {
+      await retryOnRateLimit(
+        () => ctx.reply('🎮 Выберите количество раундов:', { reply_markup: { inline_keyboard: keyboard } }),
+        5,
+        { ignore403: true }
+      );
+    } catch (err) {
+      if (err.message === 'USER_BLOCKED') {
+        const userId = ctx.from.id;
+        console.log(`[Quiz] Игрок ${userId} заблокировал бота при старте. Игра не начата.`);
+        artGames.delete(userId);
+        return;
+      }
+      console.error('Не удалось отправить выбор раундов:', err);
+    }
   }
 
   bot.command('quiz', async (ctx) => {
@@ -153,24 +199,52 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
         return ctx.reply('❌ В папке arts нет подходящих картинок!');
       }
 
-      // Инициализируем игру и ожидаем выбора, сколько артов одного автора показывать
+      // 🚀 Загружаем статистику ОДИН РАЗ при старте игры
+      const stats = await getAuthorStatsFromDb();
+
       artGames.set(userId, {
         totalRounds: rounds,
         currentRound: 0,
         score: 0,
         usedAuthors: new Set(),
         authorsMap,
+        authorStats: stats, // ✅ Сохраняем в игру
         pending: 'per_count'
       });
 
-      // Отправим выбор: 1,2,3, Все
+
       const keyboard = [
-        [ { text: '1', callback_data: 'arts_count_1' }, { text: '2', callback_data: 'arts_count_2' } ],
-        [ { text: '3', callback_data: 'arts_count_3' }, { text: 'Все', callback_data: 'arts_count_all' } ]
+        [{ text: '1', callback_data: 'arts_count_1' }, { text: '2', callback_data: 'arts_count_2' }],
+        [{ text: '3', callback_data: 'arts_count_3' }, { text: 'Все', callback_data: 'arts_count_all' }]
       ];
 
-      await ctx.editMessageText(`🎮 Раундов: ${rounds}. Выбери, сколько артов одного автора показывать:`);
-      await ctx.reply('Выбери количество пиксельартов по которым надо угадать автора - чем меньше артов тем сложнее будет угадывать. Если выберерешь "Все" то бот будет присылать от 3 до 6 артов в зависимости от автора:', { reply_markup: { inline_keyboard: keyboard } });
+      try {
+        await retryOnRateLimit(
+          () => ctx.editMessageText(`🎮 Раундов: ${rounds}. Выбери, сколько артов одного автора показывать:`),
+          5,
+          { ignore403: true }
+        );
+      } catch (err) {
+        if (err.message === 'USER_BLOCKED') {
+          artGames.delete(userId);
+          return;
+        }
+      }
+
+      try {
+        await retryOnRateLimit(
+          () => ctx.reply('Выбери количество пиксельартов по которым надо угадать автора - чем меньше артов тем сложнее будет угадывать. Если выберерешь "Все" то бот будет присылать от 3 до 6 артов в зависимости от автора:', {
+            reply_markup: { inline_keyboard: keyboard }
+          }),
+          5,
+          { ignore403: true }
+        );
+      } catch (err) {
+        if (err.message === 'USER_BLOCKED') {
+          artGames.delete(userId);
+          return;
+        }
+      }
     } catch (err) {
       console.error('Ошибка выбора раундов (arts):', err);
     }
@@ -197,7 +271,20 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
       const perTextTask = game.perAuthorCount === 'all'
         ? 'Задача: угадать автора арта по всем доступным артам'
         : `Задача: угадать автора арта по ${game.perAuthorCount} артам`;
-      await ctx.editMessageText(perTextTask);
+
+      try {
+        await retryOnRateLimit(
+          () => ctx.editMessageText(perTextTask),
+          5,
+          { ignore403: true }
+        );
+      } catch (err) {
+        if (err.message === 'USER_BLOCKED') {
+          artGames.delete(userId);
+          return;
+        }
+      }
+
       setTimeout(() => sendNextArtQuestion(ctx, userId), 500);
     } catch (err) {
       console.error('Ошибка выбора количества артов (arts_count):', err);
@@ -208,50 +295,76 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
     const game = artGames.get(userId);
     if (!game) return;
 
-    const authorsKeys = Array.from(game.authorsMap.keys()).filter(a => !game.usedAuthors.has(a));
+    const authorsMap = game.authorsMap;
+    const allAuthors = Array.from(authorsMap.keys());
+    const usedAuthors = game.usedAuthors;
+
     let chosenAuthor;
-    if (authorsKeys.length === 0) {
-      // все использованы — сбрасываем
-      game.usedAuthors.clear();
-      chosenAuthor = Array.from(game.authorsMap.keys())[Math.floor(Math.random() * game.authorsMap.size)];
+
+    const availableAuthors = allAuthors.filter(a => !usedAuthors.has(a));
+
+    if (game.currentRound < 5 && availableAuthors.length > 0) {
+      // ✅ Используем статистику, загруженную при старте
+      const stats = game.authorStats;
+
+      // Добавляем авторов без статистики
+      allAuthors.forEach(username => {
+        if (!stats.has(username)) {
+          stats.set(username, 0);
+        }
+      });
+
+      // Сортируем по частоте показов
+      availableAuthors.sort((a, b) => (stats.get(a) || 0) - (stats.get(b) || 0));
+      chosenAuthor = availableAuthors[0];
     } else {
-      chosenAuthor = authorsKeys[Math.floor(Math.random() * authorsKeys.length)];
-      game.usedAuthors.add(chosenAuthor);
+      if (availableAuthors.length === 0) {
+        game.usedAuthors.clear();
+        const remaining = allAuthors.filter(a => a !== game.currentAuthor);
+        chosenAuthor = remaining.length > 0
+          ? remaining[Math.floor(Math.random() * remaining.length)]
+          : allAuthors[Math.floor(Math.random() * allAuthors.length)];
+      } else {
+        chosenAuthor = availableAuthors[Math.floor(Math.random() * availableAuthors.length)];
+      }
     }
 
-    const filesList = game.authorsMap.get(chosenAuthor) || [];
-    const totalImages = filesList.length || 1;
+    game.usedAuthors.add(chosenAuthor);
+
+    const filesList = authorsMap.get(chosenAuthor) || [];
     game.currentAuthor = chosenAuthor;
     game.currentFiles = filesList;
-    game.currentIndex = 1;
-    game.totalImages = totalImages;
+    game.totalImages = filesList.length || 1;
     game.messageId = null;
     game.chatId = ctx.chat.id;
-
-    // Сбрасываем прошлые варианты выбора, чтобы для каждого раунда генерировались новые опции
     game.currentChoices = null;
     game.buttonsKeyboard = null;
     game.buttonsMessageId = null;
 
-    // Не делаем предзагрузку/кеширование всех артов — будем загружать по требованию.
-    await sendArtMessage(ctx, userId);
+    try {
+      await sendArtMessage(ctx, userId);
+    } catch (err) {
+      if (err.message === 'USER_BLOCKED') {
+        console.log(`[Quiz] Игрок ${userId} заблокировал бота. Игра удалена.`);
+        artGames.delete(userId);
+        return;
+      }
+      console.error('Ошибка отправки арта:', err);
+    }
   }
 
   async function buildChoices(correctUsername) {
     const captionsUsers = getCaptionsUsernames();
-    // Ensure correctUsername is present and fill up to 4 unique options
     const otherCandidates = captionsUsers.filter(u => u !== correctUsername);
     const optionsSet = new Set();
     optionsSet.add(correctUsername);
 
-    // Shuffle otherCandidates and pick until we have up to 4
     const shuffled = otherCandidates.sort(() => 0.5 - Math.random());
     for (let i = 0; i < shuffled.length && optionsSet.size < 4; i++) {
       optionsSet.add(shuffled[i]);
     }
 
     const options = Array.from(optionsSet);
-    // Final shuffle so correct isn't always at same position
     options.sort(() => 0.5 - Math.random());
     return options;
   }
@@ -260,24 +373,34 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
     const game = artGames.get(userId);
     if (!game) return;
 
-    // Отправляем столько артов одного автора, сколько выбрал игрок (1,2,3 или 'all')
     let desired = game.perAuthorCount || 3;
     if (desired === 'all') desired = (game.currentFiles || []).length;
     desired = Math.max(1, Math.min((game.currentFiles || []).length, desired));
     const filesToSend = (game.currentFiles || []).slice(0, desired);
+
     if (!filesToSend.length) {
-      return ctx.reply('Нет картинок у этого автора.');
+      try {
+        await retryOnRateLimit(
+          () => ctx.reply('Нет картинок у этого автора.'),
+          5,
+          { ignore403: true }
+        );
+      } catch (err) {
+        if (err.message === 'USER_BLOCKED') {
+          artGames.delete(userId);
+        }
+      }
+      return;
     }
 
-    // Сохраняем одинаковые варианты кнопок для раунда
     if (!game.currentChoices) {
       game.currentChoices = await buildChoices(game.currentAuthor);
     }
     const choices = game.currentChoices;
-    const choiceButtons = choices.map(opt => ({ text: captions[opt + '.jpg'] || opt, callback_data: `arts_choose_${encodeURIComponent(opt)}` }));
-    const replyMarkup = { inline_keyboard: [choiceButtons] };
+    const choiceRows = choices.map(opt => [
+      { text: captions[opt + '.jpg'] || opt, callback_data: `arts_choose_${filesToSend[0].index}_${encodeURIComponent(opt)}` }
+    ]);
 
-    // Попробуем отправить все файлы (фото и видео) одной медиагруппой.
     const mediaAll = filesToSend.map(p => {
       const ext = path.extname(p.file).toLowerCase();
       const type = ext === '.mp4' ? 'video' : 'photo';
@@ -285,16 +408,23 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
     });
 
     game.mediaMessages = [];
-    let sentArray = null;
+
     try {
-      sentArray = await bot.telegram.sendMediaGroup(game.chatId, mediaAll);
+      const sentArray = await retryOnRateLimit(
+        () => bot.telegram.sendMediaGroup(game.chatId, mediaAll),
+        5,
+        { ignore403: true }
+      );
       for (let i = 0; i < sentArray.length; i++) {
-        const m = sentArray[i];
-        game.mediaMessages.push({ message_id: m.message_id, artIndex: filesToSend[i].index });
+        game.mediaMessages.push({ message_id: sentArray[i].message_id, artIndex: filesToSend[i].index });
       }
     } catch (err) {
-      console.warn('sendMediaGroup for mixed media failed, falling back to separate sends:', err && err.message ? err.message : err);
-      // fallback: send videos first individually, then photos as a media group
+      if (err.message === 'USER_BLOCKED') {
+        artGames.delete(userId);
+        return;
+      }
+
+      console.warn('sendMediaGroup failed, falling back to individual sends:', err.message);
       const photoFiles = [];
       const videoFiles = [];
       for (const f of filesToSend) {
@@ -303,98 +433,160 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
         else photoFiles.push(f);
       }
 
-      // send videos individually
       for (const v of videoFiles) {
         const filePath = path.join(artsDir, v.file);
         try {
-            const sent = await bot.telegram.sendVideo(game.chatId, { source: fs.createReadStream(filePath) });
-            if (sent && sent.message_id) game.mediaMessages.push({ message_id: sent.message_id, artIndex: v.index });
-          } catch (e) {
+          const sent = await retryOnRateLimit(
+            () => bot.telegram.sendVideo(game.chatId, { source: fs.createReadStream(filePath) }),
+            5,
+            { ignore403: true }
+          );
+          if (sent?.message_id) {
+            game.mediaMessages.push({ message_id: sent.message_id, artIndex: v.index });
           }
+        } catch (e) {
+          if (e.message === 'USER_BLOCKED') {
+            artGames.delete(userId);
+            return;
+          }
+        }
       }
 
-      // send photos as media group
       if (photoFiles.length > 0) {
         const media = photoFiles.map(p => ({ type: 'photo', media: { source: fs.createReadStream(path.join(artsDir, p.file)) } }));
         try {
-          const sentPhotos = await bot.telegram.sendMediaGroup(game.chatId, media);
+          const sentPhotos = await retryOnRateLimit(
+            () => bot.telegram.sendMediaGroup(game.chatId, media),
+            5,
+            { ignore403: true }
+          );
           for (let i = 0; i < sentPhotos.length; i++) {
-            const m = sentPhotos[i];
-            game.mediaMessages.push({ message_id: m.message_id, artIndex: photoFiles[i].index });
+            game.mediaMessages.push({ message_id: sentPhotos[i].message_id, artIndex: photoFiles[i].index });
           }
         } catch (err2) {
+          if (err2.message === 'USER_BLOCKED') {
+            artGames.delete(userId);
+            return;
+          }
           for (const p of photoFiles) {
             try {
-              const sent = await ctx.replyWithPhoto({ source: fs.createReadStream(path.join(artsDir, p.file)) });
-              if (sent && sent.message_id) game.mediaMessages.push({ message_id: sent.message_id, artIndex: p.index });
+              const sent = await retryOnRateLimit(
+                () => ctx.replyWithPhoto({ source: fs.createReadStream(path.join(artsDir, p.file)) }),
+                5,
+                { ignore403: true }
+              );
+              if (sent?.message_id) {
+                game.mediaMessages.push({ message_id: sent.message_id, artIndex: p.index });
+              }
             } catch (e) {
+              if (e.message === 'USER_BLOCKED') {
+                artGames.delete(userId);
+                return;
+              }
             }
           }
         }
       }
     }
 
-    // Теперь отправим одно сообщение с вариантами — каждая кнопка на отдельной строке
-    const primaryArt = filesToSend[0];
-    const artIdx = primaryArt.index;
-    const choiceRows = choices.map(opt => [ { text: captions[opt + '.jpg'] || opt, callback_data: `arts_choose_${artIdx}_${encodeURIComponent(opt)}` } ]);
-
     try {
-      const buttonsMsg = await ctx.reply('Выбери автора для этих артов', { reply_markup: { inline_keyboard: choiceRows } });
-      if (buttonsMsg && buttonsMsg.message_id) {
+      const buttonsMsg = await retryOnRateLimit(
+        () => ctx.reply('Выбери автора для этих артов', { reply_markup: { inline_keyboard: choiceRows } }),
+        5,
+        { ignore403: true }
+      );
+      if (buttonsMsg?.message_id) {
         game.buttonsMessageId = buttonsMsg.message_id;
-        game.buttonsKeyboard = choiceRows;
-        game.primaryArtIndex = artIdx;
+        game.primaryArtIndex = filesToSend[0].index;
       }
     } catch (err) {
+      if (err.message === 'USER_BLOCKED') {
+        artGames.delete(userId);
+        return;
+      }
+      console.error('Ошибка отправки кнопок выбора:', err);
     }
   }
 
-  // Removed navigation handlers — we send three images at once now.
-
   bot.action(/^arts_choose_(\d+)_(.+)$/, async (ctx) => {
+    const userId = ctx.from.id;
+    const game = artGames.get(userId);
+    if (!game) return;
+
     try {
       await ctx.answerCbQuery();
+
       const match = ctx.callbackQuery.data.match(/^arts_choose_(\d+)_(.+)$/);
+      if (!match) return;
       const artIndex = parseInt(match[1], 10);
       const selected = decodeURIComponent(match[2]);
-      const userId = ctx.from.id;
-      const game = artGames.get(userId);
-      if (!game) return;
-
-      // Убираем кнопки
-      try {
-        await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-      } catch (e) {
-      }
 
       const correct = game.currentAuthor;
       const channelName = captions[correct + '.jpg'] || correct;
+
       if (selected === correct) {
         game.score++;
-        await ctx.reply(`🎉 Правильно, автор @${correct}`);
+        try {
+          await retryOnRateLimit(
+            () => ctx.reply(`🎉 Правильно, автор @${correct}`),
+            5,
+            { ignore403: true }
+          );
+        } catch (err) {
+          if (err.message === 'USER_BLOCKED') {
+            artGames.delete(userId);
+            return;
+          }
+        }
         await updateQuizStatsInDb(correct, channelName, artIndex, true);
       } else {
-        await ctx.reply(`❌ Неверно, автор арта @${correct}`);
+        try {
+          await retryOnRateLimit(
+            () => ctx.reply(`❌ Неверно, автор арта @${correct}`),
+            5,
+            { ignore403: true }
+          );
+        } catch (err) {
+          if (err.message === 'USER_BLOCKED') {
+            artGames.delete(userId);
+            return;
+          }
+        }
         await updateQuizStatsInDb(correct, channelName, artIndex, false);
       }
 
-      // Отключаем кнопки в сообщении с кнопками (заменяем клавиатуру на пустую)
       try {
-        if (game && game.buttonsMessageId) {
-          try {
-            await bot.telegram.editMessageReplyMarkup(game.chatId, game.buttonsMessageId, null, { inline_keyboard: [] });
-          } catch (e) {
-          }
+        if (game.buttonsMessageId) {
+          await retryOnRateLimit(
+            () => bot.telegram.editMessageReplyMarkup(game.chatId, game.buttonsMessageId, null, { inline_keyboard: [] }),
+            5,
+            { ignore403: true }
+          );
         }
       } catch (e) {
+        if (e.message === 'USER_BLOCKED') {
+          artGames.delete(userId);
+          return;
+        }
       }
 
       game.currentRound++;
 
       const remaining = Math.max(0, game.totalRounds - game.currentRound);
       const correctCount = game.score || 0;
-      await ctx.reply(`Пройдено: ${game.currentRound}. Правильных: ${correctCount} Осталось: ${remaining}`);
+
+      try {
+        await retryOnRateLimit(
+          () => ctx.reply(`Пройдено: ${game.currentRound}. Правильных: ${correctCount} Осталось: ${remaining}`),
+          5,
+          { ignore403: true }
+        );
+      } catch (err) {
+        if (err.message === 'USER_BLOCKED') {
+          artGames.delete(userId);
+          return;
+        }
+      }
 
       if (game.currentRound >= game.totalRounds) {
         const perText = game.perAuthorCount === 'all'
@@ -403,32 +595,44 @@ module.exports = function registerQuiz({ bot, supabase, captions, artsDir }) {
 
         const finalMsg = `🏁 Игра окончена! Твой результат: ${game.score} из ${game.totalRounds}\n${perText}`;
 
-        await ctx.reply(finalMsg, {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '🔁 Играть снова', callback_data: 'arts_play_again' },
-                { text: 'Выбрать другую игру', callback_data: 'choose_game' }
-              ]
-            ]
+        try {
+          await retryOnRateLimit(
+            () => ctx.reply(finalMsg, {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '🔁 Играть снова', callback_data: 'arts_play_again' }],
+                  [{ text: 'Выбрать другую игру', callback_data: 'choose_game' }]
+                ]
+              }
+            }),
+            5,
+            { ignore403: true }
+          );
+        } catch (err) {
+          if (err.message === 'USER_BLOCKED') {
+            // всё равно удаляем
           }
-        });
+        }
         artGames.delete(userId);
         return;
       }
 
-      // Небольшая пауза и следующий вопрос
-      setTimeout(() => sendNextArtQuestion(ctx, userId), 900);
+      setTimeout(() => sendNextArtQuestion(ctx, userId), 300);
     } catch (err) {
+      if (err.message === 'USER_BLOCKED') {
+        artGames.delete(userId);
+        return;
+      }
+      console.error('Ошибка в arts_choose:', err);
     }
   });
 
-    // Обработчик кнопки 'Играть снова' для артов
-    bot.action('arts_play_again', async (ctx) => {
-      try {
-        await ctx.answerCbQuery();
-        await sendRoundsSelection(ctx);
-      } catch (err) {
-      }
-    });
+  bot.action('arts_play_again', async (ctx) => {
+    try {
+      await ctx.answerCbQuery();
+      await sendRoundsSelection(ctx);
+    } catch (err) {
+      console.error('Ошибка arts_play_again:', err);
+    }
+  });
 };
